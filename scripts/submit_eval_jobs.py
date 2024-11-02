@@ -611,7 +611,7 @@ if args.run_safety_evaluations:
     task_spec = d["tasks"][0]
     task_spec["name"] = experiment_name
     task_spec["arguments"][0] = f'''
-PYTHONPATH=. python evaluation/run_all_generation_benchmarks.py \
+VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONPATH=. python evaluation/run_all_generation_benchmarks.py \
     --model_name_or_path /model \
     --model_input_template_path_or_name hf \
     --report_output_path /output/metrics.json \
@@ -627,6 +627,18 @@ PYTHONPATH=. python evaluation/run_all_generation_benchmarks.py \
         task_spec['arguments'] = [task_spec['arguments'][0].replace("--tokenizer_name_or_path /model", "--tokenizer_name_or_path "+model_info[1])]
     else:  # if it's a beaker model, mount the beaker dataset to `/model`
         task_spec['datasets'][1]['source']['beaker'] = model_info[1]
+
+    task_spec = adjust_gpus(
+        task_spec=task_spec,
+        experiment_group="safety_eval",
+        model_name=model_info[0],
+        gpu_multiplier=args.gpu_multiplier,
+    )
+
+    # add gpu information.
+    # we just assume you want to use all the gpus for one task at a time
+    num_gpus = task_spec['resources']['gpuCount']
+    task_spec["arguments"][0]+= f" --min_gpus_per_task {num_gpus}"
 
     if args.upload_to_hf:
         hf_dataset = args.upload_to_hf
