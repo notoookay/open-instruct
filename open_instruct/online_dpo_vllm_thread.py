@@ -515,7 +515,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     # handle preemption
     class PreemptionHandler:
-        preemptied = False
+        preempted = False
 
         def __init__(self):
             signal.signal(signal.SIGTERM, self.exit_gracefully)
@@ -534,7 +534,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     print("vllm thread terminated")
                 except Exception as e:
                     print(e)
-            self.preemptied = True
+            self.preempted = True
 
     ph = PreemptionHandler()
 
@@ -620,7 +620,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         episode += args.batch_size
         scheduler.step()
         queries = queries_next
-        if ph.preemptied:
+        if ph.preempted:
             break
 
         if accelerator.is_main_process:
@@ -915,7 +915,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "val/num_stop_token_ids": global_metrics[1],
                 "objective/kl": global_metrics[2],
                 "objective/kl2": global_metrics[15],
-                "ojbective/kl3": global_metrics[16],
+                "objective/kl3": global_metrics[16],
                 "objective/entropy": global_metrics[3],
                 "objective/non_score_reward": global_metrics[4],
                 "objective/rlhf_reward": global_metrics[5],
@@ -938,7 +938,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         gc.collect()
         torch.cuda.empty_cache()
 
-    if not ph.preemptied:
+    if not ph.preempted:
         # save model
         os.makedirs(os.path.dirname(args.output_dir), exist_ok=True)
         original_tokenizer = AutoTokenizer.from_pretrained(
@@ -985,6 +985,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     --pure_docker_mode \
                     --gpus 0 -- python scripts/wait_beaker_dataset_model_upload_then_evaluate_model.py \
                     --beaker_workload_id {beaker_config.beaker_workload_id} \
+                --upload_to_hf {args.hf_metadata_dataset} \
                     --model_name {args.hf_repo_revision}
                 """
                 process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
