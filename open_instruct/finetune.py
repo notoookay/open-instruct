@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import random
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ import datasets
 import deepspeed
 import torch
 import transformers
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.logging import get_logger
 from accelerate.utils import InitProcessGroupKwargs, set_seed
 from datasets import load_dataset
@@ -337,6 +338,8 @@ class FlatArguments:
         default=0.5,
         metadata={"help": "Weight for load balancing loss if applicable."},
     )
+    try_auto_save_to_beaker: bool = True
+    """Whether to try to save the model to Beaker dataset `/output` after training"""
     push_to_hub: bool = True
     """Whether to upload the saved model to huggingface"""
     hf_entity: Optional[str] = None
@@ -471,9 +474,6 @@ def main(args: FlatArguments):
 
     if is_beaker_job():
         beaker_config = maybe_get_beaker_config()
-        # try saving to the beaker `/output`, which will be uploaded to the beaker dataset
-        if len(beaker_config.beaker_dataset_id_urls) > 0:
-            args.output_dir = "/output"
 
     accelerator_log_kwargs = {}
 
@@ -483,10 +483,11 @@ def main(args: FlatArguments):
 
     # if you get timeouts (e.g. due to long tokenization) increase this.
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=args.timeout))
+    dataloader_config = DataLoaderConfiguration(use_seedable_sampler=True)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        use_seedable_sampler=True,
+        dataloader_config=dataloader_config,
         **accelerator_log_kwargs,
         kwargs_handlers=[timeout_kwargs],
     )
@@ -1033,6 +1034,14 @@ def main(args: FlatArguments):
     if accelerator.is_local_main_process:
         clean_last_n_checkpoints(args.output_dir, keep_last_n_checkpoints=0)
 
+    if (
+        args.try_auto_save_to_beaker
+        and accelerator.is_main_process
+        and len(beaker_config.beaker_dataset_id_urls) > 0
+        and args.output_dir.rstrip("/") != "/output"
+    ):
+        shutil.copytree(args.output_dir, "/output", dirs_exist_ok=True)
+
     if is_beaker_job() and accelerator.is_main_process:
         # dpo script only supports these two options right now for datasets
         if args.dataset_mixer:
@@ -1070,7 +1079,7 @@ def main(args: FlatArguments):
         if args.try_launch_beaker_eval_jobs:
             command = f"""\
             python mason.py  \
-                --cluster ai2/allennlp-cirrascale ai2/pluto-cirrascale ai2/neptune-cirrascale ai2/saturn-cirrascale ai2/jupiter-cirrascale-2 \
+                --cluster ai2/ganymede-cirrascale ai2/ceres-cirrascale ai2/neptune-cirrascale ai2/saturn-cirrascale ai2/jupiter-cirrascale-2 \
                 --priority low \
                 --preemptible \
                 --budget ai2/allennlp \
@@ -1080,7 +1089,8 @@ def main(args: FlatArguments):
                 --gpus 0 -- python scripts/wait_beaker_dataset_model_upload_then_evaluate_model.py \
                 --beaker_workload_id {beaker_config.beaker_workload_id} \
                 --upload_to_hf {args.hf_metadata_dataset} \
-                --model_name {args.run_name}
+                --model_name {args.run_name} \
+                --run_id {wandb_tracker.run.get_url()}
             """
             process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()

@@ -151,13 +151,21 @@ class LLMRayActor:
             else:
                 RayWorkerWrapperPath = vllm.engine.ray_utils
 
-            class RayWorkerWrapper(RayWorkerWrapperPath.RayWorkerWrapper):
-                def __init__(self, *args, **kwargs) -> None:
-                    kwargs["worker_module_name"] = "open_instruct.vllm_utils2"
-                    kwargs["worker_class_name"] = "WorkerWrap"
-                    super().__init__(*args, **kwargs)
+            # patch for newer vllm from openrlhf:
+            # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/vllm_engine.py#L40
+            if vllm.__version__ > "0.6.4.post1":
+                # https://github.com/vllm-project/vllm/pull/10555
+                kwargs["worker_cls"] = "open_instruct.vllm_utils2.WorkerWrap"
+            else:
+                RayWorkerWrapperPath = vllm.executor.ray_utils
 
-            RayWorkerWrapperPath.RayWorkerWrapper = RayWorkerWrapper
+                class RayWorkerWrapper(RayWorkerWrapperPath.RayWorkerWrapper):
+                    def __init__(self, *args, **kwargs) -> None:
+                        kwargs["worker_module_name"] = "open_instruct.vllm_utils2"
+                        kwargs["worker_class_name"] = "WorkerWrap"
+                        super().__init__(*args, **kwargs)
+
+                RayWorkerWrapperPath.RayWorkerWrapper = RayWorkerWrapper
 
         self.llm = vllm.LLM(*args, **kwargs)
 
@@ -192,6 +200,7 @@ class LLMRayActor:
 def create_vllm_engines(
     num_engines: int,
     tensor_parallel_size: int,
+    enforce_eager: bool,
     pretrain: str,
     revision: str,
     seed: int,
@@ -224,6 +233,7 @@ def create_vllm_engines(
                 tokenizer_revision=revision,
                 trust_remote_code=True,
                 tensor_parallel_size=tensor_parallel_size,
+                enforce_eager=enforce_eager,
                 dtype="bfloat16",
                 seed=seed + i,
                 enable_prefix_caching=enable_prefix_caching,
