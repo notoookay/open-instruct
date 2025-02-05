@@ -1,6 +1,6 @@
 import argparse
 import re
-from typing import List
+from typing import List, Dict
 import beaker
 import os
 import secrets
@@ -12,6 +12,19 @@ def parse_beaker_dataset(dataset_str):
         raise argparse.ArgumentError()
 
     return {"mount_path": splt[0], "beaker": splt[1]}
+
+
+def parse_env_var(env_var_str: str) -> Dict[str, str]:
+    """Parse environment variable string in the format 'name=value'"""
+    if '=' not in env_var_str:
+        raise argparse.ArgumentTypeError(
+            f"Environment variable must be in format 'name=value', got: {env_var_str}"
+        )
+    name, value = env_var_str.split('=', 1)
+    if not name:
+        raise argparse.ArgumentTypeError("Environment variable name cannot be empty")
+    return {"name": name, "value": value}
+
 
 NFS_CLUSTERS = [
     "ai2/allennlp-cirrascale",
@@ -105,8 +118,17 @@ def get_args():
     parser.add_argument(
         "--resumable", action="store_true", help="If given, make the job resumable"
     )
-
-
+    parser.add_argument(
+        "--no_auto_dataset_cache", action="store_true", help="If given, don't cache the dataset automatically"
+    )
+    parser.add_argument(
+        "--env",
+        type=parse_env_var,
+        action="append",
+        help="""Additional environment variables in the format 'name=value'. 
+        Can be specified multiple times. Example: --env MY_VAR=value1 --env OTHER_VAR=value2""",
+        default=[],
+    )
     # Split up the mason args from the Python args.
     mason_args, command_args = parser.parse_known_args()
     commands = parse_commands(command_args)
@@ -147,8 +169,17 @@ def parse_commands(command_args: List[str]) -> List[List[str]]:
     return commands
 
 
-def get_env_vars(pure_docker_mode: bool, cluster: List[str], beaker_secrets: List[str], whoami: str, resumable: bool, num_nodes: int):
+def get_env_vars(pure_docker_mode: bool, cluster: List[str], beaker_secrets: List[str], 
+                whoami: str, resumable: bool, num_nodes: int, additional_env_vars: List[Dict[str, str]]):
     env_vars = []
+    # Add user-specified environment variables first
+    for env_var in additional_env_vars:
+        env_vars.append(
+            beaker.EnvVar(
+                name=env_var["name"],
+                value=env_var["value"]
+            )
+        )
     useful_secrets = [
         "HF_TOKEN",
         "WANDB_API_KEY",
@@ -412,7 +443,7 @@ def get_datasets(beaker_datasets, cluster: List[str]):
     return res
 
 
-def make_task_spec(args, command, i, beaker_secrets, whoami, resumable: bool):
+def make_task_spec(args, command: List[str], i: int, beaker_secrets: str, whoami: str, resumable: bool):
     # special logic to deal with escape like
     # python mason.py ... -- python x.py --dataset_mixer '{"trl-internal-testing/sentiment-trl-style": 1.0}'
     # we need to wrap the json string with single quote
@@ -427,6 +458,27 @@ def make_task_spec(args, command, i, beaker_secrets, whoami, resumable: bool):
         "git config --global safe.directory '*' && " # fix the permission issue with git
         "umask 000 && " # fix the permission issue with the cache folder
     )
+    
+    # HACK: Cache dataset logic:
+    # Here we basically try to run the tokenization full_command locally before running it on beaker
+    # We could in theory submit a cpu only job to beaker to do this, but that requires setting up
+    # dependency jobs somehow. Since tokenization is like ~5 minutes, we can just run it locally.
+    # Once it's cached, we don't need to cache it again.
+    def find_list_idx(lst: List[str], item: str):
+        for i in range(len(lst)):
+            if item == lst[i]:
+                return i
+        return -1
+    if not args.no_auto_dataset_cache:
+        for file in ["open_instruct/finetune.py", "open_instruct/dpo_tune_cache.py"]:
+            idx = find_list_idx(full_command, file)
+            if idx != -1:
+                # then try executing the same full_command with 
+                caching_command = "python " + " ".join(full_command[idx:]) + " --cache_dataset_only"
+                print(f"📦📦📦 Running the caching full_command: {caching_command}")
+                os.system(caching_command)
+                print("✅✅✅ Finished running the caching full_command")
+
     if not args.pure_docker_mode:
         setup_commands += f"cd {os.getcwd()} && "
 
@@ -458,7 +510,8 @@ def make_task_spec(args, command, i, beaker_secrets, whoami, resumable: bool):
         context=beaker.TaskContext(priority=beaker.Priority(args.priority),
                                    preemptible=args.preemptible),
         constraints=beaker.Constraints(cluster=args.cluster),
-        env_vars=get_env_vars(args.pure_docker_mode, args.cluster, beaker_secrets, whoami, resumable, args.num_nodes),
+        env_vars=get_env_vars(args.pure_docker_mode, args.cluster, beaker_secrets, 
+                            whoami, resumable, args.num_nodes, args.env),
         resources=beaker.TaskResources(gpu_count=args.gpus),
         replicas=args.num_nodes,
     )
